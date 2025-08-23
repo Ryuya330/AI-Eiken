@@ -39,6 +39,21 @@
   <!-- デバッグ用パネル: Firebase 初期化や auth 状態を可視化するために追加 -->
   <div id="debug-panel" style="position:fixed;right:12px;bottom:12px;z-index:9999;max-width:320px;font-family:monospace;font-size:12px"></div>
 
+  <!-- 開発者向けアドバイス（ページ上に常時表示） -->
+  <div id="dev-advice" style="position:fixed;left:12px;bottom:12px;z-index:9999;max-width:360px;background:#fff;border:1px solid #e5e7eb;padding:10px;border-radius:8px;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:12px;box-shadow:0 6px 18px rgba(0,0,0,0.08)">
+    <strong style="display:block;margin-bottom:6px">開発メモ</strong>
+    <div style="margin-bottom:6px">• React DevTools を使うと開発が楽になります: <a href="https://reactjs.org/link/react-devtools" target="_blank" rel="noopener">React DevTools</a></div>
+    <div style="margin-bottom:6px">• file:// で開くと拡張や一部スクリプトで問題が出ます。ローカル HTTP サーバーで提供してください。</div>
+    <details style="margin-bottom:6px"><summary style="cursor:pointer">ローカルサーバー例</summary>
+      <div style="margin-top:6px">PowerShell (Python がある場合):</div>
+      <pre style="background:#f8fafc;padding:6px;border-radius:4px;margin-top:6px">python -m http.server 8000</pre>
+      <div style="margin-top:6px">Node (http-server):</div>
+      <pre style="background:#f8fafc;padding:6px;border-radius:4px;margin-top:6px">npx http-server . -p 8000</pre>
+    </details>
+    <div style="margin-bottom:6px">• Tailwind: CDN は開発用のみ推奨。本番は Tailwind CLI / PostCSS としてビルドに組み込んでください: <a href="https://tailwindcss.com/docs/installation" target="_blank" rel="noopener">Tailwind インストール</a></div>
+    <div style="margin-bottom:6px">• 現在は in-browser Babel を使用しています。公開前にスクリプトを事前コンパイルしてください: <a href="https://babeljs.io/docs/setup/" target="_blank" rel="noopener">Babel setup</a></div>
+  </div>
+
     <!--
       1) このモジュールスクリプトで Firebase の ESM を読み込み、必要な関数を window.__firebaseHelpers に公開します。
       2) メインのアプリ（Babelでトランスパイルされる）はこの window.__firebaseHelpers を参照します。
@@ -89,12 +104,16 @@
           el.innerHTML = `<div style="background:#111;color:#fff;padding:8px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.2);">${rows}</div>`;
         } catch (e) { console.error('debug panel error', e); }
       };
+  // 初期的なデバッグパネル内容
+  try { window.__updateDebugPanel({ info: 'dev: open debug panel', tailwindCDN: 'using-cdn (dev only)', babel: 'in-browser (precompile for prod)', reactDevTools: 'recommended' }); } catch(e){}
   // 他スクリプトが待機できるよう、helpers 準備完了イベントを発火
   try { window.dispatchEvent(new Event('firebaseHelpersReady')); } catch(e) { /* ignore */ }
     </script>
 
   <!-- メインアプリ（JSX）: Babelがトランスパイルします -->
   <!-- data-presets="react" を追加して Babel standalone に JSX トランスパイルを明示的に指示します -->
+  <!-- ローカル開発用のシークレット読み込み（必ず .gitignore に追加し、公開リポジトリにコミットしないこと） -->
+  <script src="secrets.js"></script>
   <script type="text/babel" data-presets="react">
   (function(){
     function runApp(){
@@ -117,41 +136,47 @@
       // SDK の modular/non-modular 形を気にせず onAuthStateChanged を呼べるヘルパー
       function safeOnAuthStateChanged(authInstance, callback) {
         try {
-          // もし authInstance が falsy なら、可能なら getAuth(app) / getAuth() で取得を試みる
+          // Ensure we have an auth instance if possible
           if ((!authInstance || typeof authInstance !== 'object') && typeof getAuth === 'function') {
-            try {
-              authInstance = (typeof app !== 'undefined') ? getAuth(app) : getAuth();
-            } catch (e) {
-              try { authInstance = getAuth(); } catch (e2) { /* ignore */ }
+            try { authInstance = (typeof app !== 'undefined') ? getAuth(app) : getAuth(); } catch (e) { try { authInstance = getAuth(); } catch (e2) { /* ignore */ } }
+          }
+
+          // 1) If helpers expose onAuthStateChanged (modular wrapper or mock), prefer that
+          try {
+            if (window.__firebaseHelpers && typeof window.__firebaseHelpers.onAuthStateChanged === 'function') {
+              try {
+                window.__updateDebugPanel({ authListener: 'helpers-onAuthStateChanged' });
+              } catch (e) {}
+              return window.__firebaseHelpers.onAuthStateChanged(authInstance, callback);
             }
-          }
+          } catch (e) { /* continue */ }
 
-          if (!authInstance) throw new Error('no auth instance');
-
-          // authInstance がクラスインスタンスで onAuthStateChanged を持つ場合
-          if (typeof authInstance.onAuthStateChanged === 'function') {
-            return authInstance.onAuthStateChanged(callback);
-          }
-
-          // SDK のユーティリティ関数がある場合は、適切な auth インスタンスを渡して呼ぶ
+          // 2) If global modular helper exists, try to use it (pass an auth instance)
           if (typeof onAuthStateChanged === 'function') {
             try {
               const authToUse = authInstance || ((typeof getAuth === 'function') ? ((typeof app !== 'undefined') ? getAuth(app) : getAuth()) : undefined);
               if (!authToUse) throw new Error('could not obtain auth instance for SDK onAuthStateChanged');
+              try { window.__updateDebugPanel({ authListener: 'sdk-onAuthStateChanged' }); } catch (e) {}
               return onAuthStateChanged(authToUse, callback);
             } catch (err) {
-              console.warn('onAuthStateChanged (SDK) threw, falling back to polling listener', err);
-              try { window.__updateDebugPanel({ authListener: 'sdk-error-fallback', authListenerError: err?.message || String(err) }); } catch(e){}
-              // fall through to polling fallback below
+              console.warn('onAuthStateChanged (SDK) threw, will try instance method or fallback', err);
+              try { window.__updateDebugPanel({ authListener: 'sdk-error', authListenerError: err?.message || String(err) }); } catch(e){}
             }
           }
 
-          // mock の場合
+          // 3) Instance method (compat cases)
+          if (authInstance && typeof authInstance.onAuthStateChanged === 'function') {
+            try { window.__updateDebugPanel({ authListener: 'instance-onAuthStateChanged' }); } catch(e){}
+            return authInstance.onAuthStateChanged(callback);
+          }
+
+          // 4) Mock helper if present
           if (typeof window.__onAuthStateChangedMock === 'function') {
+            try { window.__updateDebugPanel({ authListener: 'mock-onAuthStateChanged' }); } catch(e){}
             return window.__onAuthStateChangedMock(authInstance, callback);
           }
 
-          // 最後の手段: polling ベースのフォールバックリスナー
+          // 5) Polling fallback
           let lastUser = authInstance && authInstance.currentUser ? authInstance.currentUser : null;
           const interval = setInterval(() => {
             try {
@@ -188,9 +213,11 @@
         // 簡易チェック: 必須値が設定されているかコンソールにも表示
         if (!firebaseConfig || !firebaseConfig.projectId || firebaseConfig.projectId === "YOUR_PROJECT_ID") {
           console.warn("Firebase設定が未設定です。index.html の firebaseConfig を設定してください。");
+          console.warn("注意: 開発中はモックが使われますが、本番環境では必ず secrets.js に安全に鍵を注入してください。");
         }
         if (!apiKey || apiKey === "YOUR_GOOGLE_API_KEY") {
           console.warn("Google API キーが未設定です。API呼び出しは失敗します。");
+          console.warn("Google Generative API キーは機密情報です。公開リポジトリに含めないでください。");
         }
 
         // Initialize Firebase safely (skip if config looks like placeholder)
