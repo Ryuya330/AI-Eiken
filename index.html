@@ -36,6 +36,9 @@
 <body>
     <div id="root"></div>
 
+  <!-- デバッグ用パネル: Firebase 初期化や auth 状態を可視化するために追加 -->
+  <div id="debug-panel" style="position:fixed;right:12px;bottom:12px;z-index:9999;max-width:320px;font-family:monospace;font-size:12px"></div>
+
     <!--
       1) このモジュールスクリプトで Firebase の ESM を読み込み、必要な関数を window.__firebaseHelpers に公開します。
       2) メインのアプリ（Babelでトランスパイルされる）はこの window.__firebaseHelpers を参照します。
@@ -58,23 +61,125 @@
         onSnapshot,
         serverTimestamp
       };
+
+      // 手動で匿名サインインを試すためのデバッグヘルパー
+      window.__attemptSignIn = async function() {
+        try {
+          const authObj = (window.__firebaseHelpers && typeof window.__firebaseHelpers.getAuth === 'function') ? window.__firebaseHelpers.getAuth() : null;
+          const signInFn = window.__firebaseHelpers && window.__firebaseHelpers.signInAnonymously;
+          if (!signInFn) throw new Error('signInAnonymously が利用できません');
+          const res = await signInFn(authObj);
+          const uid = res?.user?.uid || (authObj && authObj.uid) || '(no-uid)';
+          window.__updateDebugPanel({ authAttempt: 'success', authUserId: uid });
+          console.info('Manual sign-in success', res);
+          return res;
+        } catch (e) {
+          window.__updateDebugPanel({ authAttempt: 'failed', authAttemptError: e?.message || String(e) });
+          console.error('Manual sign-in failed', e);
+          throw e;
+        }
+      };
+
+      // 簡易なデバッグUIヘルパーを提供（script間で利用）
+      window.__updateDebugPanel = function(obj) {
+        try {
+          const el = document.getElementById('debug-panel');
+          if (!el) return;
+          const rows = Object.entries(obj).map(([k,v]) => `<div><strong>${k}:</strong> ${String(v)}</div>`).join('');
+          el.innerHTML = `<div style="background:#111;color:#fff;padding:8px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.2);">${rows}</div>`;
+        } catch (e) { console.error('debug panel error', e); }
+      };
+  // 他スクリプトが待機できるよう、helpers 準備完了イベントを発火
+  try { window.dispatchEvent(new Event('firebaseHelpersReady')); } catch(e) { /* ignore */ }
     </script>
 
-    <!-- メインアプリ（JSX）: Babelがトランスパイルします -->
-    <script type="text/babel" data-type="module">
-        // Firebase ESM を直接 import する代わりに、事前に読み込んだ window.__firebaseHelpers を使います
-        const {
-          initializeApp,
-          getAuth,
-          onAuthStateChanged,
-          signInAnonymously,
-          getFirestore,
-          collection,
-          addDoc,
-          query,
-          onSnapshot,
-          serverTimestamp
-        } = window.__firebaseHelpers || {};
+  <!-- メインアプリ（JSX）: Babelがトランスパイルします -->
+  <!-- data-presets="react" を追加して Babel standalone に JSX トランスパイルを明示的に指示します -->
+  <script type="text/babel" data-presets="react">
+  (function(){
+    function runApp(){
+      // Firebase ESM を直接 import する代わりに、事前に読み込んだ window.__firebaseHelpers を使います
+      const {
+        initializeApp,
+        getAuth,
+        onAuthStateChanged,
+        signInAnonymously,
+        getFirestore,
+        collection,
+        addDoc,
+        query,
+        onSnapshot,
+        serverTimestamp
+      } = window.__firebaseHelpers || {};
+
+      // デバッグ情報をページ上に表示（firebaseHelpers の有無やロード状況）
+      try {
+        const hasHelpers = !!window.__firebaseHelpers;
+        const availableFns = Object.keys(window.__firebaseHelpers || {}).filter(k => typeof window.__firebaseHelpers[k] === 'function');
+        window.__updateDebugPanel({ helpersLoaded: hasHelpers, functions: availableFns.join(', ') });
+        console.info('Firebase helpers:', window.__firebaseHelpers);
+      } catch (e) {
+        console.error('Error updating debug panel', e);
+      }
+
+  // auth のフォールバックは後続の初期化ブロックで扱います。
+
+      // --- 以下、元のアプリコード ---
+
+      // SDK の modular/non-modular 形を気にせず onAuthStateChanged を呼べるヘルパー
+      function safeOnAuthStateChanged(authInstance, callback) {
+        try {
+          // もし authInstance が falsy なら、可能なら getAuth(app) / getAuth() で取得を試みる
+          if ((!authInstance || typeof authInstance !== 'object') && typeof getAuth === 'function') {
+            try {
+              authInstance = (typeof app !== 'undefined') ? getAuth(app) : getAuth();
+            } catch (e) {
+              try { authInstance = getAuth(); } catch (e2) { /* ignore */ }
+            }
+          }
+
+          if (!authInstance) throw new Error('no auth instance');
+
+          // authInstance がクラスインスタンスで onAuthStateChanged を持つ場合
+          if (typeof authInstance.onAuthStateChanged === 'function') {
+            return authInstance.onAuthStateChanged(callback);
+          }
+
+          // SDK のユーティリティ関数がある場合は、適切な auth インスタンスを渡して呼ぶ
+          if (typeof onAuthStateChanged === 'function') {
+            try {
+              const authToUse = authInstance || ((typeof getAuth === 'function') ? ((typeof app !== 'undefined') ? getAuth(app) : getAuth()) : undefined);
+              if (!authToUse) throw new Error('could not obtain auth instance for SDK onAuthStateChanged');
+              return onAuthStateChanged(authToUse, callback);
+            } catch (err) {
+              console.warn('onAuthStateChanged (SDK) threw, falling back to polling listener', err);
+              try { window.__updateDebugPanel({ authListener: 'sdk-error-fallback', authListenerError: err?.message || String(err) }); } catch(e){}
+              // fall through to polling fallback below
+            }
+          }
+
+          // mock の場合
+          if (typeof window.__onAuthStateChangedMock === 'function') {
+            return window.__onAuthStateChangedMock(authInstance, callback);
+          }
+
+          // 最後の手段: polling ベースのフォールバックリスナー
+          let lastUser = authInstance && authInstance.currentUser ? authInstance.currentUser : null;
+          const interval = setInterval(() => {
+            try {
+              const nowUser = authInstance && authInstance.currentUser ? authInstance.currentUser : null;
+              if (nowUser !== lastUser) {
+                lastUser = nowUser;
+                callback(nowUser);
+              }
+            } catch (e) { /* ignore */ }
+          }, 500);
+          try { window.__updateDebugPanel({ authListener: 'polling-fallback' }); } catch(e){}
+          return () => clearInterval(interval);
+        } catch (e) {
+          throw e;
+        }
+      }
 
         // --- Firebase Configuration ---
         // TODO: 以下を必ず自分の値に置き換えてください（もしくはサーバーから設定を注入してください）
@@ -100,16 +205,58 @@
           console.warn("Google API キーが未設定です。API呼び出しは失敗します。");
         }
 
-        // Initialize Firebase safely
+        // Initialize Firebase safely (skip if config looks like placeholder)
         let app = null;
         let auth = null;
         let db = null;
-        try {
-          app = initializeApp(firebaseConfig);
-          auth = getAuth(app);
-          db = getFirestore(app);
-        } catch (e) {
-          console.error("Firebase初期化に失敗しました:", e);
+
+        const firebaseApiKeyMissing = !firebaseConfig || !firebaseConfig.apiKey || firebaseConfig.apiKey.includes('YOUR_FIREBASE_API_KEY') || firebaseConfig.projectId === 'YOUR_PROJECT_ID';
+        if (firebaseApiKeyMissing) {
+          console.warn('Firebase APIキーが未設定またはプレースホルダです。Firebase初期化をスキップします。');
+          try {
+            // ローカル開発用の簡易モックを準備しておくと、Firebase 実装が未設定でも UI のデバッグがしやすくなります。
+            const mockUid = 'localdev-' + Date.now();
+            auth = { uid: mockUid };
+            // mock implementations
+            const onAuthStateChangedMock = (a, cb) => { setTimeout(() => cb({ uid: mockUid }), 50); return () => {}; };
+            const signInAnonymouslyMock = (a) => Promise.resolve({ user: { uid: mockUid } });
+            const collectionMock = (dbObj, path) => ({ __mockPath: path });
+            const addDocMock = (colRef, data) => { console.warn('mock addDoc', colRef, data); return Promise.resolve({ id: 'mock-' + Date.now() }); };
+            const queryMock = () => ({});
+            const onSnapshotMock = (q, cb) => { console.warn('mock onSnapshot'); cb({ forEach: () => {} }); return () => {}; };
+            const serverTimestampMock = () => ({ _mock: Date.now() });
+
+            // expose as __firebaseHelpers so Babel code's destructure picks them up
+            window.__firebaseHelpers = {
+              initializeApp: () => null,
+              getAuth: () => auth,
+              onAuthStateChanged: onAuthStateChangedMock,
+              signInAnonymously: signInAnonymouslyMock,
+              getFirestore: () => ({}),
+              collection: collectionMock,
+              addDoc: addDocMock,
+              query: queryMock,
+              onSnapshot: onSnapshotMock,
+              serverTimestamp: serverTimestampMock
+            };
+
+            window.__updateDebugPanel({ firebaseProjectId: firebaseConfig?.projectId || '(none)', appInitialized: false, authInitialized: true, dbInitialized: true, firebaseApiKeyMissing: true, usingMock: true });
+            // notify listeners that helpers are now available
+            try { window.dispatchEvent(new Event('firebaseHelpersReady')); } catch(e){}
+          } catch (e) { /* ignore */ }
+        } else {
+          try {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+          } catch (e) {
+            console.error('Firebase初期化に失敗しました:', e);
+          }
+          // 初期化結果をデバッグパネルに表示
+          try {
+            window.__updateDebugPanel({ firebaseProjectId: firebaseConfig?.projectId || '(none)', appInitialized: !!app, authInitialized: !!auth, dbInitialized: !!db });
+            console.info('Firebase init', { app, auth, db });
+          } catch (e) { /* ignore */ }
         }
 
         // --- Helper Functions for Audio/Image Processing ---
@@ -161,21 +308,41 @@
           React.useEffect(() => {
             if (!auth || !onAuthStateChanged || !signInAnonymously) {
               console.warn("Auth 関連が未初期化です。Firebase の初期化を確認してください。");
+              try { window.__updateDebugPanel({ authStatus: 'helpers-missing', authInitialized: !!auth }); } catch(e){}
               setLoadingAuth(false);
               return;
             }
-            const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-              if (currentUser) {
-                setUser(currentUser);
-                setLoadingAuth(false);
-              } else {
-                signInAnonymously(auth).catch((error) => {
-                  console.error("Anonymous sign-in failed:", error);
+
+            try { window.__updateDebugPanel({ authStatus: 'listening', authInitialized: !!auth }); } catch(e){}
+
+            let unsubscribe = () => {};
+            try {
+              unsubscribe = safeOnAuthStateChanged(auth, (currentUser) => {
+                try { window.__updateDebugPanel({ authStatus: currentUser ? 'signed-in' : 'signed-out', userId: currentUser?.uid || '' }); } catch(e){}
+                if (currentUser) {
+                  console.info('onAuthStateChanged: signed in', currentUser);
+                  setUser(currentUser);
                   setLoadingAuth(false);
-                });
-              }
-            });
-            return () => unsubscribe();
+                } else {
+                  console.info('onAuthStateChanged: no user, calling signInAnonymously');
+                  signInAnonymously(auth).then((userCredential) => {
+                    console.info('signInAnonymously success', userCredential);
+                    try { window.__updateDebugPanel({ authStatus: 'signed-in', userId: userCredential.user?.uid || '' }); } catch(e){}
+                    setUser(userCredential.user);
+                    setLoadingAuth(false);
+                  }).catch((error) => {
+                    console.error('Anonymous sign-in failed:', error);
+                    try { window.__updateDebugPanel({ authStatus: 'sign-in-failed', signInError: error?.message || String(error) }); } catch(e){}
+                    setLoadingAuth(false);
+                  });
+                }
+              });
+            } catch (err) {
+              console.error('onAuthStateChanged threw:', err);
+              try { window.__updateDebugPanel({ authStatus: 'onAuthStateChanged-error', error: err?.message || String(err) }); } catch(e){}
+              setLoadingAuth(false);
+            }
+            return () => { try { unsubscribe(); } catch(e){} };
           }, []);
 
           const renderCurrentView = () => {
@@ -593,6 +760,16 @@
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
         root.render(<App />);
+
+      } // end runApp
+
+      // helpers が既に用意されていれば即実行、未準備ならイベントで待機
+      if (window.__firebaseHelpers) {
+        runApp();
+      } else {
+        window.addEventListener('firebaseHelpersReady', runApp, { once: true });
+      }
+    })();
     </script>
 </body>
 </html>
