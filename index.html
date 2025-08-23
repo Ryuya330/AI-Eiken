@@ -98,19 +98,7 @@
   <script type="text/babel" data-presets="react">
   (function(){
     function runApp(){
-      // Firebase ESM を直接 import する代わりに、事前に読み込んだ window.__firebaseHelpers を使います
-      const {
-        initializeApp,
-        getAuth,
-        onAuthStateChanged,
-        signInAnonymously,
-        getFirestore,
-        collection,
-        addDoc,
-        query,
-        onSnapshot,
-        serverTimestamp
-      } = window.__firebaseHelpers || {};
+  // NOTE: window.__firebaseHelpers の分割代入は firebase の初期化（またはモック設定）の後に行います。
 
       // デバッグ情報をページ上に表示（firebaseHelpers の有無やロード状況）
       try {
@@ -258,6 +246,19 @@
             console.info('Firebase init', { app, auth, db });
           } catch (e) { /* ignore */ }
         }
+        // window.__firebaseHelpers の中身をここで取り出す（モックが設定されていればそれを反映）
+        const {
+          initializeApp,
+          getAuth,
+          onAuthStateChanged,
+          signInAnonymously,
+          getFirestore,
+          collection,
+          addDoc,
+          query,
+          onSnapshot,
+          serverTimestamp
+        } = window.__firebaseHelpers || {};
 
         // --- Helper Functions for Audio/Image Processing ---
         function base64ToArrayBuffer(base64) {
