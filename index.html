@@ -36,23 +36,68 @@
 <body>
     <div id="root"></div>
 
+  <!-- エラーオーバーレイ（致命的エラーが出たときに表示） -->
+  <div id="error-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:10000;align-items:center;justify-content:center;">
+    <div id="error-overlay-content" style="background:#fff;color:#111;padding:20px;border-radius:8px;max-width:760px;margin:0 16px;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;box-shadow:0 10px 40px rgba(0,0,0,0.4)"></div>
+  </div>
+
   <!-- デバッグ用パネル: Firebase 初期化や auth 状態を可視化するために追加 -->
   <div id="debug-panel" style="position:fixed;right:12px;bottom:12px;z-index:9999;max-width:320px;font-family:monospace;font-size:12px"></div>
 
   <!-- 開発者向けアドバイス（ページ上に常時表示） -->
   <div id="dev-advice" style="position:fixed;left:12px;bottom:12px;z-index:9999;max-width:360px;background:#fff;border:1px solid #e5e7eb;padding:10px;border-radius:8px;font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:12px;box-shadow:0 6px 18px rgba(0,0,0,0.08)">
     <strong style="display:block;margin-bottom:6px">開発メモ</strong>
-    <div style="margin-bottom:6px">• React DevTools を使うと開発が楽になります: <a href="https://reactjs.org/link/react-devtools" target="_blank" rel="noopener">React DevTools</a></div>
-    <div style="margin-bottom:6px">• file:// で開くと拡張や一部スクリプトで問題が出ます。ローカル HTTP サーバーで提供してください。</div>
+    <ul style="margin:0 0 8px 16px;padding:0">
+      <li>React DevTools を使うと開発が楽になります: <a href="https://reactjs.org/link/react-devtools" target="_blank" rel="noopener">React DevTools</a></li>
+      <li>file:// で開くと拡張や一部スクリプトで問題が出ます。ローカル HTTP サーバーで提供してください。</li>
+    </ul>
     <details style="margin-bottom:6px"><summary style="cursor:pointer">ローカルサーバー例</summary>
       <div style="margin-top:6px">PowerShell (Python がある場合):</div>
       <pre style="background:#f8fafc;padding:6px;border-radius:4px;margin-top:6px">python -m http.server 8000</pre>
       <div style="margin-top:6px">Node (http-server):</div>
       <pre style="background:#f8fafc;padding:6px;border-radius:4px;margin-top:6px">npx http-server . -p 8000</pre>
     </details>
-    <div style="margin-bottom:6px">• Tailwind: CDN は開発用のみ推奨。本番は Tailwind CLI / PostCSS としてビルドに組み込んでください: <a href="https://tailwindcss.com/docs/installation" target="_blank" rel="noopener">Tailwind インストール</a></div>
-    <div style="margin-bottom:6px">• 現在は in-browser Babel を使用しています。公開前にスクリプトを事前コンパイルしてください: <a href="https://babeljs.io/docs/setup/" target="_blank" rel="noopener">Babel setup</a></div>
+    <ul style="margin:0;padding:0 0 0 16px">
+      <li>Tailwind: CDN は開発用のみ推奨。本番は Tailwind CLI / PostCSS としてビルドに組み込んでください: <a href="https://tailwindcss.com/docs/installation" target="_blank" rel="noopener">Tailwind インストール</a></li>
+      <li>現在は in-browser Babel を使用しています。公開前にスクリプトを事前コンパイルしてください: <a href="https://babeljs.io/docs/setup/" target="_blank" rel="noopener">Babel setup</a></li>
+    </ul>
   </div>
+  <script>
+    // Simple mode: hide developer UI and suppress on-page debug displays
+    window.__simpleMode = true;
+    // hide dev UI elements if present
+    try { const d = document.getElementById('dev-advice'); if (d) d.style.display = 'none'; } catch(e){}
+    try { const p = document.getElementById('debug-panel'); if (p) p.style.display = 'none'; } catch(e){}
+
+    // Global error handlers: in simple mode, only log to console (no on-page panels)
+    function reportGlobalError(info) {
+      try {
+        if (window.__simpleMode) { console.error('GlobalError', info); return; }
+        if (window.__updateDebugPanel) {
+          window.__updateDebugPanel(Object.assign({ globalError: true }, info));
+        } else {
+          const el = document.getElementById('debug-panel');
+          if (el) el.innerText = JSON.stringify(info);
+        }
+      } catch (e) { console.error('reportGlobalError failed', e); }
+    }
+
+    window.addEventListener('error', function (ev) {
+      try {
+        const msg = ev && ev.message ? ev.message : String(ev.error || ev.message || ev);
+        console.error('Global error captured:', ev.error || ev.message || ev);
+        reportGlobalError({ type: 'error', message: msg, filename: ev.filename || '', lineno: ev.lineno || '', colno: ev.colno || '' });
+      } catch (e) { console.error(e); }
+    });
+
+    window.addEventListener('unhandledrejection', function (ev) {
+      try {
+        const reason = ev && ev.reason ? (ev.reason.message || String(ev.reason)) : String(ev);
+        console.error('Unhandled rejection:', ev.reason || ev);
+        reportGlobalError({ type: 'unhandledrejection', reason });
+      } catch (e) { console.error(e); }
+    });
+  </script>
 
     <!--
       1) このモジュールスクリプトで Firebase の ESM を読み込み、必要な関数を window.__firebaseHelpers に公開します。
@@ -98,14 +143,25 @@
       // 簡易なデバッグUIヘルパーを提供（script間で利用）
       window.__updateDebugPanel = function(obj) {
         try {
+          if (window.__simpleMode) return; // no-op in simple mode
           const el = document.getElementById('debug-panel');
           if (!el) return;
           const rows = Object.entries(obj).map(([k,v]) => `<div><strong>${k}:</strong> ${String(v)}</div>`).join('');
           el.innerHTML = `<div style="background:#111;color:#fff;padding:8px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.2);">${rows}</div>`;
         } catch (e) { console.error('debug panel error', e); }
       };
-  // 初期的なデバッグパネル内容
-  try { window.__updateDebugPanel({ info: 'dev: open debug panel', tailwindCDN: 'using-cdn (dev only)', babel: 'in-browser (precompile for prod)', reactDevTools: 'recommended' }); } catch(e){}
+      // 初期的なデバッグパネル内容（よくある注意事項を明示）
+      try {
+        const helperKeys = Object.keys(window.__firebaseHelpers || {}).filter(k => typeof window.__firebaseHelpers[k] === 'function');
+        window.__updateDebugPanel({
+          reactDevTools: 'https://reactjs.org/link/react-devtools',
+          reactDevToolsFAQ: 'https://reactjs.org/link/react-devtools-faq',
+          tailwindNote: 'cdn.tailwindcss.com は本番非推奨（ビルド統合を検討）',
+          babelNote: 'in-browser Babel を使用中 — 公開前に事前コンパイル推奨 (https://babeljs.io/docs/setup/)',
+          sourceMapHints: 'file:////node_modules/... の source map 読取エラーが出る場合がある（UNC host 制限）',
+          firebaseHelpers: helperKeys.join(', ') || '(none)'
+        });
+      } catch(e){}
   // 他スクリプトが待機できるよう、helpers 準備完了イベントを発火
   try { window.dispatchEvent(new Event('firebaseHelpersReady')); } catch(e) { /* ignore */ }
     </script>
@@ -787,15 +843,38 @@
         }
 
         const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        function showErrorOverlay(message) {
+          try {
+            if (window.__simpleMode) { console.error('Overlay suppressed:', message); return; }
+            const overlay = document.getElementById('error-overlay');
+            const content = document.getElementById('error-overlay-content');
+            if (content) content.innerText = message;
+            if (overlay) overlay.style.display = 'flex';
+          } catch (e) { console.error('showErrorOverlay failed', e); }
+        }
+
+        try {
+          root.render(<App />);
+        } catch (e) {
+          console.error('Render error', e);
+          try { window.__updateDebugPanel({ renderError: e?.message || String(e) }); } catch(_){}
+          showErrorOverlay('アプリの初期化に失敗しました。コンソールを確認してください。\n' + (e?.message || String(e)));
+        }
 
       } // end runApp
 
       // helpers が既に用意されていれば即実行、未準備ならイベントで待機
-      if (window.__firebaseHelpers) {
-        runApp();
-      } else {
-        window.addEventListener('firebaseHelpersReady', runApp, { once: true });
+      try {
+        if (window.__firebaseHelpers) {
+          runApp();
+        } else {
+          window.addEventListener('firebaseHelpersReady', function(){
+            try { runApp(); } catch (e) { try { window.__updateDebugPanel({ startupError: e?.message || String(e) }); } catch(_){} }
+          }, { once: true });
+        }
+      } catch (e) {
+        try { window.__updateDebugPanel({ startupError: e?.message || String(e) }); } catch(_){}
+        console.error('Error while starting app', e);
       }
     })();
     </script>
